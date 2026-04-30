@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+
+BASE_URL = "https://statsapi.mlb.com/api/v1"
+LIVE_URL = "https://statsapi.mlb.com/api/v1.1"
+
+SPORT_LEVELS = {
+    11: "AAA",
+    12: "AA",
+    13: "A+",
+    14: "A",
+    16: "R",
+}
+
+DEFAULT_SPORT_IDS = tuple(SPORT_LEVELS)
+
+STATIC_WHIFF_CODES = {"S", "W", "Q", "T", "M", "O"}
+
+
+BATTER_COLUMNS = [
+    "player_id",
+    "player_name",
+    "game_pk",
+    "game_date",
+    "team_id",
+    "team_name",
+    "level",
+    "ab",
+    "pa",
+    "h",
+    "singles",
+    "doubles",
+    "triples",
+    "hr",
+    "r",
+    "rbi",
+    "bb",
+    "ibb",
+    "so",
+    "hbp",
+    "sf",
+    "sh",
+    "gdp",
+    "sb",
+    "cs",
+    "bbe",
+    "avg_ev",
+    "max_ev",
+    "hard_hit",
+    "hard_hit_pct",
+    "avg_la",
+]
+
+
+PITCHER_COLUMNS = [
+    "player_id",
+    "player_name",
+    "game_pk",
+    "game_date",
+    "team_id",
+    "team_name",
+    "level",
+    "whiffs",
+    "pitches",
+    "batters_faced",
+    "w",
+    "l",
+    "cg",
+    "sho",
+    "sv",
+    "ip_outs",
+    "tbf",
+    "h",
+    "r",
+    "er",
+    "hr",
+    "bb",
+    "ibb",
+    "hbp",
+    "wp",
+    "bk",
+    "so",
+    "tracked_pitches",
+    "avg_velocity",
+    "max_velocity",
+    "bbe_allowed",
+    "avg_ev_allowed",
+    "hard_hit_allowed",
+    "hard_hit_pct_allowed",
+]
