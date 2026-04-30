@@ -22,6 +22,12 @@ pip install -r requirements.txt
 python -m milb_warehouse.cli --date 2026-04-30
 ```
 
+## Run a Date Range
+
+```powershell
+python -m milb_warehouse.cli --start-date 2026-03-27 --end-date 2026-04-30
+```
+
 Outputs:
 
 ```text
@@ -43,8 +49,14 @@ Then run:
 python -m milb_warehouse.cli --date 2026-04-30 --motherduck-db milb_stats
 ```
 
+For a season backfill, run:
+
+```powershell
+python -m milb_warehouse.cli --start-date 2026-03-27 --end-date 2026-04-30 --motherduck-db milb_stats
+```
+
 The loader deletes and reloads the requested date, which makes daily runs
-idempotent.
+idempotent. Date ranges run serially and reuse one MotherDuck connection.
 
 ## Daily GitHub Actions Load
 

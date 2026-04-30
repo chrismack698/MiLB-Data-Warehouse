@@ -22,8 +22,14 @@ def parse_date(value: str) -> date:
 
 def parse_args() -> argparse.Namespace:
     default_date = (date.today() - timedelta(days=1)).isoformat()
-    parser = argparse.ArgumentParser(description="Build MiLB warehouse game logs for one date.")
-    parser.add_argument("--date", default=default_date, help="Game date to extract, YYYY-MM-DD.")
+    parser = argparse.ArgumentParser(description="Build MiLB warehouse game logs.")
+    parser.add_argument(
+        "--date",
+        default="",
+        help=f"Single game date to extract, YYYY-MM-DD. Default: {default_date}.",
+    )
+    parser.add_argument("--start-date", default="", help="First game date for a backfill, YYYY-MM-DD.")
+    parser.add_argument("--end-date", default="", help="Last game date for a backfill, YYYY-MM-DD.")
     parser.add_argument(
         "--sport-ids",
         default=",".join(str(sport_id) for sport_id in DEFAULT_SPORT_IDS),
@@ -43,6 +49,24 @@ def parse_args() -> argparse.Namespace:
 def project_path(value: str) -> Path:
     path = Path(value)
     return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def dates_to_load(args: argparse.Namespace) -> list[date]:
+    if args.date and (args.start_date or args.end_date):
+        raise ValueError("Use either --date or --start-date/--end-date, not both.")
+
+    if args.start_date or args.end_date:
+        if not args.start_date or not args.end_date:
+            raise ValueError("--start-date and --end-date must be provided together.")
+        start_date = parse_date(args.start_date)
+        end_date = parse_date(args.end_date)
+        if start_date > end_date:
+            raise ValueError("--start-date must be on or before --end-date.")
+
+        days = (end_date - start_date).days
+        return [start_date + timedelta(days=offset) for offset in range(days + 1)]
+
+    return [parse_date(args.date) if args.date else date.today() - timedelta(days=1)]
 
 
 def extract_for_date(
@@ -100,23 +124,17 @@ def extract_for_date(
     return (*frames_from_rows(batter_rows, pitcher_rows), pd.DataFrame(error_rows))
 
 
-def main() -> None:
-    args = parse_args()
-    game_date = parse_date(args.date)
-    sport_ids = tuple(int(value.strip()) for value in args.sport_ids.split(",") if value.strip())
-    cache_dir = project_path(args.cache_dir)
-    parquet_dir = project_path(args.parquet_dir)
-
-    client = StatsApiClient(
-        cache_dir=cache_dir,
-        delay=args.delay,
-        force_refresh=args.force_refresh,
-        request_timeout=args.request_timeout,
-        retries=args.retries,
-    )
-
+def load_one_date(
+    game_date: date,
+    sport_ids: tuple[int, ...],
+    client: StatsApiClient,
+    parquet_dir: Path,
+    limit_games: int,
+    motherduck_db: str = "",
+    motherduck_con: Any | None = None,
+) -> None:
     print(f"Extracting MiLB game logs for {game_date.isoformat()}", flush=True)
-    batters, pitchers, errors = extract_for_date(game_date, sport_ids, client, args.limit_games)
+    batters, pitchers, errors = extract_for_date(game_date, sport_ids, client, limit_games)
 
     batter_path = write_parquet_snapshot(batters, parquet_dir, "batter_game_logs", game_date)
     pitcher_path = write_parquet_snapshot(pitchers, parquet_dir, "pitcher_game_logs", game_date)
@@ -130,13 +148,46 @@ def main() -> None:
         errors.to_csv(error_path, index=False)
         print(f"Wrote {len(errors):,} errors to {error_path}", flush=True)
 
+    if motherduck_con is not None:
+        reload_game_log_date(motherduck_con, batters, pitchers, game_date)
+        print(f"Reloaded {game_date.isoformat()} into MotherDuck database {motherduck_db}", flush=True)
+
+
+def main() -> None:
+    args = parse_args()
+    load_dates = dates_to_load(args)
+    sport_ids = tuple(int(value.strip()) for value in args.sport_ids.split(",") if value.strip())
+    cache_dir = project_path(args.cache_dir)
+    parquet_dir = project_path(args.parquet_dir)
+
+    client = StatsApiClient(
+        cache_dir=cache_dir,
+        delay=args.delay,
+        force_refresh=args.force_refresh,
+        request_timeout=args.request_timeout,
+        retries=args.retries,
+    )
+
+    print(f"Loading {len(load_dates)} date(s): {load_dates[0]} through {load_dates[-1]}", flush=True)
     if args.motherduck_db:
         con = connect_motherduck(args.motherduck_db)
         try:
-            reload_game_log_date(con, batters, pitchers, game_date)
+            for game_date in load_dates:
+                load_one_date(
+                    game_date,
+                    sport_ids,
+                    client,
+                    parquet_dir,
+                    args.limit_games,
+                    args.motherduck_db,
+                    con,
+                )
         finally:
             con.close()
-        print(f"Reloaded {game_date.isoformat()} into MotherDuck database {args.motherduck_db}", flush=True)
+        return
+
+    for game_date in load_dates:
+        load_one_date(game_date, sport_ids, client, parquet_dir, args.limit_games)
 
 
 if __name__ == "__main__":
