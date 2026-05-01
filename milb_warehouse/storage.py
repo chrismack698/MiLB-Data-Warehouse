@@ -12,6 +12,14 @@ if TYPE_CHECKING:
     import duckdb
 
 
+TABLE_ID_COLUMNS = {
+    "batter_game_logs": "batter_game_log_id",
+    "pitcher_game_logs": "pitcher_game_log_id",
+    "pitch_events": "pitch_event_id",
+    "batted_ball_events": "batted_ball_event_id",
+}
+
+
 def write_parquet_snapshot(df: pd.DataFrame, root: Path, table_name: str, game_date: date) -> Path:
     output_dir = root / table_name / f"game_date={game_date.isoformat()}"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -30,10 +38,12 @@ def create_tables(con: "duckdb.DuckDBPyConnection") -> None:
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS batter_game_logs (
+            batter_game_log_id BIGINT,
             player_id INTEGER,
             player_name VARCHAR,
             game_pk INTEGER,
             game_date DATE,
+            season INTEGER,
             team_id INTEGER,
             team_name VARCHAR,
             level VARCHAR,
@@ -67,10 +77,12 @@ def create_tables(con: "duckdb.DuckDBPyConnection") -> None:
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS pitcher_game_logs (
+            pitcher_game_log_id BIGINT,
             player_id INTEGER,
             player_name VARCHAR,
             game_pk INTEGER,
             game_date DATE,
+            season INTEGER,
             team_id INTEGER,
             team_name VARCHAR,
             level VARCHAR,
@@ -107,8 +119,10 @@ def create_tables(con: "duckdb.DuckDBPyConnection") -> None:
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS pitch_events (
+            pitch_event_id BIGINT,
             game_pk INTEGER,
             game_date DATE,
+            season INTEGER,
             sport_id INTEGER,
             level VARCHAR,
             inning INTEGER,
@@ -160,8 +174,10 @@ def create_tables(con: "duckdb.DuckDBPyConnection") -> None:
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS batted_ball_events (
+            batted_ball_event_id BIGINT,
             game_pk INTEGER,
             game_date DATE,
+            season INTEGER,
             sport_id INTEGER,
             level VARCHAR,
             inning INTEGER,
@@ -202,7 +218,42 @@ def create_tables(con: "duckdb.DuckDBPyConnection") -> None:
         )
         """
     )
+    migrate_tables(con)
     create_views(con)
+
+
+def migrate_tables(con: "duckdb.DuckDBPyConnection") -> None:
+    for table_name, id_column in TABLE_ID_COLUMNS.items():
+        con.execute(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {id_column} BIGINT")
+        con.execute(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS season INTEGER")
+        con.execute(
+            f"""
+            UPDATE {table_name}
+            SET season = YEAR(game_date)
+            WHERE season IS NULL
+              AND game_date IS NOT NULL
+            """
+        )
+        con.execute(
+            f"""
+            WITH
+            max_existing AS (
+                SELECT COALESCE(MAX({id_column}), 0) AS max_id
+                FROM {table_name}
+            ),
+            numbered AS (
+                SELECT
+                    rowid AS rid,
+                    ROW_NUMBER() OVER (ORDER BY game_date, game_pk, rowid) AS rn
+                FROM {table_name}
+                WHERE {id_column} IS NULL
+            )
+            UPDATE {table_name} AS t
+            SET {id_column} = n.rn + m.max_id
+            FROM numbered AS n, max_existing AS m
+            WHERE t.rowid = n.rid
+            """
+        )
 
 
 def create_views(con: "duckdb.DuckDBPyConnection") -> None:
@@ -253,6 +304,7 @@ def create_views(con: "duckdb.DuckDBPyConnection") -> None:
         """
         CREATE OR REPLACE VIEW batter_statcast_summary AS
         SELECT
+            season,
             batter_id AS player_id,
             batter_name AS player_name,
             level,
@@ -264,13 +316,14 @@ def create_views(con: "duckdb.DuckDBPyConnection") -> None:
             SUM(CASE WHEN is_hard_hit THEN 1 ELSE 0 END)::DOUBLE
                 / NULLIF(COUNT(launch_speed), 0) AS hard_hit_pct
         FROM batted_ball_events
-        GROUP BY batter_id, batter_name, level
+        GROUP BY season, batter_id, batter_name, level
         """
     )
     con.execute(
         """
         CREATE OR REPLACE VIEW pitcher_pitch_type_summary AS
         SELECT
+            season,
             pitcher_id AS player_id,
             pitcher_name AS player_name,
             level,
@@ -283,7 +336,7 @@ def create_views(con: "duckdb.DuckDBPyConnection") -> None:
             SUM(CASE WHEN is_whiff THEN 1 ELSE 0 END) AS whiffs,
             SUM(CASE WHEN is_whiff THEN 1 ELSE 0 END)::DOUBLE / NULLIF(COUNT(*), 0) AS whiff_pct
         FROM pitch_events
-        GROUP BY pitcher_id, pitcher_name, level, pitch_type, pitch_name
+        GROUP BY season, pitcher_id, pitcher_name, level, pitch_type, pitch_name
         """
     )
 
@@ -296,11 +349,13 @@ def reload_date(
     columns: list[str],
 ) -> None:
     create_tables(con)
+    id_column = TABLE_ID_COLUMNS[table_name]
     ordered = df.reindex(columns=columns)
     con.register("_reload_df", ordered)
     if ordered.empty:
         con.execute(f"DELETE FROM {table_name} WHERE game_date = ?", [game_date])
     else:
+        max_id = con.execute(f"SELECT COALESCE(MAX({id_column}), 0) FROM {table_name}").fetchone()[0]
         con.execute(
             f"""
             DELETE FROM {table_name}
@@ -309,7 +364,23 @@ def reload_date(
             """,
             [game_date],
         )
-        con.execute(f"INSERT INTO {table_name} SELECT * FROM _reload_df")
+        insert_columns = ", ".join([id_column, *columns])
+        select_columns = ", ".join(columns)
+        if "at_bat_index" in columns:
+            order_columns = "game_date, game_pk, at_bat_index, event_index"
+        else:
+            order_columns = "game_date, game_pk, team_name, player_name"
+        con.execute(
+            f"""
+            INSERT INTO {table_name} ({insert_columns})
+            SELECT
+                {int(max_id)} + ROW_NUMBER() OVER (
+                    ORDER BY {order_columns}
+                ) AS {id_column},
+                {select_columns}
+            FROM _reload_df
+            """
+        )
     con.unregister("_reload_df")
 
 

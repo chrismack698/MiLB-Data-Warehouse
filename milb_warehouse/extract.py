@@ -86,6 +86,12 @@ def game_date_from(game: dict[str, Any]) -> str:
     return datetime.fromisoformat(game["gameDate"].replace("Z", "+00:00")).date().isoformat()
 
 
+def season_from(game: dict[str, Any]) -> int:
+    if game.get("season"):
+        return int(game["season"])
+    return int(game_date_from(game)[:4])
+
+
 def collect_event_metrics(
     live_data: dict[str, Any], whiff_codes: set[str]
 ) -> tuple[dict[tuple[int, int], dict[str, Any]], dict[tuple[int, int], dict[str, Any]]]:
@@ -190,6 +196,7 @@ def event_context(
     return {
         "game_pk": int(game["gamePk"]),
         "game_date": game_date_from(game),
+        "season": season_from(game),
         "sport_id": sport_id,
         "level": batter_team["level"],
         "inning": about.get("inning"),
@@ -277,6 +284,7 @@ def extract_game_logs(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     game_pk = int(game["gamePk"])
     game_date = game_date_from(game)
+    season = season_from(game)
     boxscore = live_data.get("liveData", {}).get("boxscore", {})
     teams = boxscore.get("teams", {})
     batter_metrics, pitcher_metrics = collect_event_metrics(live_data, whiff_codes)
@@ -300,6 +308,7 @@ def extract_game_logs(
                 "player_name": person.get("fullName"),
                 "game_pk": game_pk,
                 "game_date": game_date,
+                "season": season,
                 "team_id": context["team_id"],
                 "team_name": context["team_name"],
                 "level": context["level"],

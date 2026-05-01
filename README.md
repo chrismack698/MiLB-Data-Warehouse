@@ -67,6 +67,16 @@ MotherDuck tables:
 - `pitch_events`
 - `batted_ball_events`
 
+Each MotherDuck table has a database-generated surrogate key:
+
+- `batter_game_logs.batter_game_log_id`
+- `pitcher_game_logs.pitcher_game_log_id`
+- `pitch_events.pitch_event_id`
+- `batted_ball_events.batted_ball_event_id`
+
+Each table also has a `season` column so historical backfills can coexist with
+future seasons.
+
 Use the event-level tables for Statcast-style aggregates so you do not average
 game-level averages. For example:
 

@@ -22,6 +22,7 @@ BATTER_COLUMNS = [
     "player_name",
     "game_pk",
     "game_date",
+    "season",
     "team_id",
     "team_name",
     "level",
@@ -57,6 +58,7 @@ PITCHER_COLUMNS = [
     "player_name",
     "game_pk",
     "game_date",
+    "season",
     "team_id",
     "team_name",
     "level",
@@ -93,6 +95,7 @@ PITCHER_COLUMNS = [
 PITCH_EVENT_COLUMNS = [
     "game_pk",
     "game_date",
+    "season",
     "sport_id",
     "level",
     "inning",
@@ -144,6 +147,7 @@ PITCH_EVENT_COLUMNS = [
 BATTED_BALL_COLUMNS = [
     "game_pk",
     "game_date",
+    "season",
     "sport_id",
     "level",
     "inning",
