@@ -18,10 +18,10 @@ from .constants import (
 
 def is_final_game(game: dict[str, Any]) -> bool:
     status = game.get("status", {})
-    return status.get("abstractGameState") == "Final" or status.get("detailedState") in {
-        "Final",
-        "Completed Early",
-    }
+    detailed_state = status.get("detailedState")
+    if detailed_state in {"Postponed", "Suspended", "Cancelled"}:
+        return False
+    return status.get("abstractGameState") == "Final" or detailed_state in {"Final", "Completed Early"}
 
 
 def display_level(sport_id: int, league_name: str | None) -> str:
@@ -81,6 +81,8 @@ def average(values: list[float]) -> float | None:
 
 
 def game_date_from(game: dict[str, Any]) -> str:
+    if game.get("officialDate"):
+        return str(game["officialDate"])
     return datetime.fromisoformat(game["gameDate"].replace("Z", "+00:00")).date().isoformat()
 
 

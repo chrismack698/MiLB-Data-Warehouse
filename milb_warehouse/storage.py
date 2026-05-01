@@ -298,8 +298,17 @@ def reload_date(
     create_tables(con)
     ordered = df.reindex(columns=columns)
     con.register("_reload_df", ordered)
-    con.execute(f"DELETE FROM {table_name} WHERE game_date = ?", [game_date])
-    if not ordered.empty:
+    if ordered.empty:
+        con.execute(f"DELETE FROM {table_name} WHERE game_date = ?", [game_date])
+    else:
+        con.execute(
+            f"""
+            DELETE FROM {table_name}
+            WHERE game_date = ?
+               OR game_pk IN (SELECT DISTINCT game_pk FROM _reload_df)
+            """,
+            [game_date],
+        )
         con.execute(f"INSERT INTO {table_name} SELECT * FROM _reload_df")
     con.unregister("_reload_df")
 
