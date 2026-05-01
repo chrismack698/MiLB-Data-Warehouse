@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from .constants import BATTER_COLUMNS, PITCHER_COLUMNS
+from .constants import BATTED_BALL_COLUMNS, BATTER_COLUMNS, PITCHER_COLUMNS, PITCH_EVENT_COLUMNS
 
 if TYPE_CHECKING:
     import duckdb
@@ -104,6 +104,104 @@ def create_tables(con: "duckdb.DuckDBPyConnection") -> None:
         )
         """
     )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pitch_events (
+            game_pk INTEGER,
+            game_date DATE,
+            sport_id INTEGER,
+            level VARCHAR,
+            inning INTEGER,
+            half_inning VARCHAR,
+            at_bat_index INTEGER,
+            event_index INTEGER,
+            play_id VARCHAR,
+            pitch_number INTEGER,
+            batter_id INTEGER,
+            batter_name VARCHAR,
+            pitcher_id INTEGER,
+            pitcher_name VARCHAR,
+            batter_team_id INTEGER,
+            batter_team_name VARCHAR,
+            pitcher_team_id INTEGER,
+            pitcher_team_name VARCHAR,
+            bat_side VARCHAR,
+            pitch_hand VARCHAR,
+            balls INTEGER,
+            strikes INTEGER,
+            outs INTEGER,
+            pitch_type VARCHAR,
+            pitch_name VARCHAR,
+            call_code VARCHAR,
+            call_description VARCHAR,
+            event_type VARCHAR,
+            result_event VARCHAR,
+            result_description VARCHAR,
+            is_in_play BOOLEAN,
+            is_strike BOOLEAN,
+            is_ball BOOLEAN,
+            is_out BOOLEAN,
+            is_whiff BOOLEAN,
+            start_speed DOUBLE,
+            end_speed DOUBLE,
+            zone INTEGER,
+            plate_x DOUBLE,
+            plate_z DOUBLE,
+            extension DOUBLE,
+            spin_rate DOUBLE,
+            spin_direction DOUBLE,
+            break_horizontal DOUBLE,
+            break_vertical_induced DOUBLE,
+            launch_speed DOUBLE,
+            launch_angle DOUBLE
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS batted_ball_events (
+            game_pk INTEGER,
+            game_date DATE,
+            sport_id INTEGER,
+            level VARCHAR,
+            inning INTEGER,
+            half_inning VARCHAR,
+            at_bat_index INTEGER,
+            event_index INTEGER,
+            play_id VARCHAR,
+            pitch_number INTEGER,
+            batter_id INTEGER,
+            batter_name VARCHAR,
+            pitcher_id INTEGER,
+            pitcher_name VARCHAR,
+            batter_team_id INTEGER,
+            batter_team_name VARCHAR,
+            pitcher_team_id INTEGER,
+            pitcher_team_name VARCHAR,
+            bat_side VARCHAR,
+            pitch_hand VARCHAR,
+            balls INTEGER,
+            strikes INTEGER,
+            outs INTEGER,
+            pitch_type VARCHAR,
+            pitch_name VARCHAR,
+            call_code VARCHAR,
+            call_description VARCHAR,
+            event_type VARCHAR,
+            result_event VARCHAR,
+            result_description VARCHAR,
+            launch_speed DOUBLE,
+            launch_angle DOUBLE,
+            total_distance DOUBLE,
+            trajectory VARCHAR,
+            hardness VARCHAR,
+            hit_location VARCHAR,
+            coord_x DOUBLE,
+            coord_y DOUBLE,
+            is_hard_hit BOOLEAN
+        )
+        """
+    )
     create_views(con)
 
 
@@ -151,6 +249,43 @@ def create_views(con: "duckdb.DuckDBPyConnection") -> None:
         FROM pitcher_game_logs
         """
     )
+    con.execute(
+        """
+        CREATE OR REPLACE VIEW batter_statcast_summary AS
+        SELECT
+            batter_id AS player_id,
+            batter_name AS player_name,
+            level,
+            COUNT(*) AS bbe,
+            AVG(launch_speed) AS avg_ev,
+            MAX(launch_speed) AS max_ev,
+            AVG(launch_angle) AS avg_la,
+            SUM(CASE WHEN is_hard_hit THEN 1 ELSE 0 END) AS hard_hit,
+            SUM(CASE WHEN is_hard_hit THEN 1 ELSE 0 END)::DOUBLE
+                / NULLIF(COUNT(launch_speed), 0) AS hard_hit_pct
+        FROM batted_ball_events
+        GROUP BY batter_id, batter_name, level
+        """
+    )
+    con.execute(
+        """
+        CREATE OR REPLACE VIEW pitcher_pitch_type_summary AS
+        SELECT
+            pitcher_id AS player_id,
+            pitcher_name AS player_name,
+            level,
+            pitch_type,
+            pitch_name,
+            COUNT(*) AS pitches,
+            AVG(start_speed) AS avg_velocity,
+            MAX(start_speed) AS max_velocity,
+            AVG(spin_rate) AS avg_spin_rate,
+            SUM(CASE WHEN is_whiff THEN 1 ELSE 0 END) AS whiffs,
+            SUM(CASE WHEN is_whiff THEN 1 ELSE 0 END)::DOUBLE / NULLIF(COUNT(*), 0) AS whiff_pct
+        FROM pitch_events
+        GROUP BY pitcher_id, pitcher_name, level, pitch_type, pitch_name
+        """
+    )
 
 
 def reload_date(
@@ -177,4 +312,19 @@ def reload_game_log_date(
 ) -> None:
     reload_date(con, "batter_game_logs", batters, game_date, BATTER_COLUMNS)
     reload_date(con, "pitcher_game_logs", pitchers, game_date, PITCHER_COLUMNS)
+    create_views(con)
+
+
+def reload_warehouse_date(
+    con: "duckdb.DuckDBPyConnection",
+    batters: pd.DataFrame,
+    pitchers: pd.DataFrame,
+    pitch_events: pd.DataFrame,
+    batted_balls: pd.DataFrame,
+    game_date: date,
+) -> None:
+    reload_date(con, "batter_game_logs", batters, game_date, BATTER_COLUMNS)
+    reload_date(con, "pitcher_game_logs", pitchers, game_date, PITCHER_COLUMNS)
+    reload_date(con, "pitch_events", pitch_events, game_date, PITCH_EVENT_COLUMNS)
+    reload_date(con, "batted_ball_events", batted_balls, game_date, BATTED_BALL_COLUMNS)
     create_views(con)

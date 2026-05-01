@@ -10,7 +10,7 @@ import pandas as pd
 from .api import StatsApiClient
 from .constants import DEFAULT_SPORT_IDS
 from .extract import extract_game_logs, frames_from_rows, is_final_game
-from .storage import connect_motherduck, reload_game_log_date, write_parquet_snapshot
+from .storage import connect_motherduck, reload_warehouse_date, write_parquet_snapshot
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -74,10 +74,12 @@ def extract_for_date(
     sport_ids: tuple[int, ...],
     client: StatsApiClient,
     limit_games: int = 0,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     whiff_codes = client.whiff_codes()
     batter_rows: list[dict[str, Any]] = []
     pitcher_rows: list[dict[str, Any]] = []
+    pitch_event_rows: list[dict[str, Any]] = []
+    batted_ball_rows: list[dict[str, Any]] = []
     error_rows: list[dict[str, Any]] = []
     seen_games: set[int] = set()
 
@@ -106,7 +108,9 @@ def extract_for_date(
 
             try:
                 live_data = client.live_game(game_pk)
-                batters, pitchers = extract_game_logs(game, live_data, sport_id, whiff_codes)
+                batters, pitchers, pitch_events, batted_balls = extract_game_logs(
+                    game, live_data, sport_id, whiff_codes
+                )
             except Exception as exc:
                 error_rows.append(
                     {"scope": "game", "sport_id": sport_id, "game_pk": game_pk, "error": str(exc)}
@@ -116,12 +120,22 @@ def extract_for_date(
 
             batter_rows.extend(batters)
             pitcher_rows.extend(pitchers)
+            pitch_event_rows.extend(pitch_events)
+            batted_ball_rows.extend(batted_balls)
 
             if limit_games and len(seen_games) >= limit_games:
                 print(f"Reached --limit-games {limit_games}", flush=True)
-                return (*frames_from_rows(batter_rows, pitcher_rows), pd.DataFrame(error_rows))
+                return (
+                    *frames_from_rows(
+                        batter_rows, pitcher_rows, pitch_event_rows, batted_ball_rows
+                    ),
+                    pd.DataFrame(error_rows),
+                )
 
-    return (*frames_from_rows(batter_rows, pitcher_rows), pd.DataFrame(error_rows))
+    return (
+        *frames_from_rows(batter_rows, pitcher_rows, pitch_event_rows, batted_ball_rows),
+        pd.DataFrame(error_rows),
+    )
 
 
 def load_one_date(
@@ -134,12 +148,20 @@ def load_one_date(
     motherduck_con: Any | None = None,
 ) -> None:
     print(f"Extracting MiLB game logs for {game_date.isoformat()}", flush=True)
-    batters, pitchers, errors = extract_for_date(game_date, sport_ids, client, limit_games)
+    batters, pitchers, pitch_events, batted_balls, errors = extract_for_date(
+        game_date, sport_ids, client, limit_games
+    )
 
     batter_path = write_parquet_snapshot(batters, parquet_dir, "batter_game_logs", game_date)
     pitcher_path = write_parquet_snapshot(pitchers, parquet_dir, "pitcher_game_logs", game_date)
+    pitch_event_path = write_parquet_snapshot(pitch_events, parquet_dir, "pitch_events", game_date)
+    batted_ball_path = write_parquet_snapshot(
+        batted_balls, parquet_dir, "batted_ball_events", game_date
+    )
     print(f"Wrote {len(batters):,} batter rows to {batter_path}", flush=True)
     print(f"Wrote {len(pitchers):,} pitcher rows to {pitcher_path}", flush=True)
+    print(f"Wrote {len(pitch_events):,} pitch rows to {pitch_event_path}", flush=True)
+    print(f"Wrote {len(batted_balls):,} batted ball rows to {batted_ball_path}", flush=True)
 
     if not errors.empty:
         error_dir = PROJECT_ROOT / "data" / "raw_debug"
@@ -149,7 +171,9 @@ def load_one_date(
         print(f"Wrote {len(errors):,} errors to {error_path}", flush=True)
 
     if motherduck_con is not None:
-        reload_game_log_date(motherduck_con, batters, pitchers, game_date)
+        reload_warehouse_date(
+            motherduck_con, batters, pitchers, pitch_events, batted_balls, game_date
+        )
         print(f"Reloaded {game_date.isoformat()} into MotherDuck database {motherduck_db}", flush=True)
 
 

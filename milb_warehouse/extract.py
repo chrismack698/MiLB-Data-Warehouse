@@ -7,7 +7,13 @@ from typing import Any
 
 import pandas as pd
 
-from .constants import BATTER_COLUMNS, PITCHER_COLUMNS, SPORT_LEVELS
+from .constants import (
+    BATTED_BALL_COLUMNS,
+    BATTER_COLUMNS,
+    PITCHER_COLUMNS,
+    PITCH_EVENT_COLUMNS,
+    SPORT_LEVELS,
+)
 
 
 def is_final_game(game: dict[str, Any]) -> bool:
@@ -41,6 +47,10 @@ def team_context(game: dict[str, Any], side: str, sport_id: int) -> dict[str, An
         "team_name": team.get("name") or team.get("teamName"),
         "level": display_level(sport_id, league_name),
     }
+
+
+def team_contexts_by_side(game: dict[str, Any], sport_id: int) -> dict[str, dict[str, Any]]:
+    return {side: team_context(game, side, sport_id) for side in ("away", "home")}
 
 
 def int_stat(stats: dict[str, Any], key: str) -> int:
@@ -139,14 +149,136 @@ def collect_event_metrics(
     return batter_metrics, pitcher_metrics
 
 
-def extract_game_logs(
+def side_context_for_play(
+    play: dict[str, Any], team_contexts: dict[str, dict[str, Any]]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    is_top_inning = play.get("about", {}).get("isTopInning")
+    if is_top_inning:
+        return team_contexts["away"], team_contexts["home"]
+    return team_contexts["home"], team_contexts["away"]
+
+
+def event_context(
+    game: dict[str, Any],
+    play: dict[str, Any],
+    event: dict[str, Any],
+    sport_id: int,
+    whiff_codes: set[str],
+    team_contexts: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    matchup = play.get("matchup", {})
+    batter = matchup.get("batter", {})
+    pitcher = matchup.get("pitcher", {})
+    batter_id = batter.get("id")
+    pitcher_id = pitcher.get("id")
+    if not batter_id or not pitcher_id:
+        return None
+
+    batter_team, pitcher_team = side_context_for_play(play, team_contexts)
+    about = play.get("about", {})
+    details = event.get("details", {})
+    pitch_type = details.get("type", {})
+    count = event.get("count", {})
+    pitch_data = event.get("pitchData", {})
+    coordinates = pitch_data.get("coordinates", {})
+    breaks = pitch_data.get("breaks", {})
+    hit_data = event.get("hitData", {})
+    code = details.get("code")
+
+    return {
+        "game_pk": int(game["gamePk"]),
+        "game_date": game_date_from(game),
+        "sport_id": sport_id,
+        "level": batter_team["level"],
+        "inning": about.get("inning"),
+        "half_inning": about.get("halfInning"),
+        "at_bat_index": about.get("atBatIndex"),
+        "event_index": event.get("index"),
+        "play_id": event.get("playId"),
+        "pitch_number": event.get("pitchNumber"),
+        "batter_id": int(batter_id),
+        "batter_name": batter.get("fullName"),
+        "pitcher_id": int(pitcher_id),
+        "pitcher_name": pitcher.get("fullName"),
+        "batter_team_id": batter_team["team_id"],
+        "batter_team_name": batter_team["team_name"],
+        "pitcher_team_id": pitcher_team["team_id"],
+        "pitcher_team_name": pitcher_team["team_name"],
+        "bat_side": matchup.get("batSide", {}).get("code"),
+        "pitch_hand": matchup.get("pitchHand", {}).get("code"),
+        "balls": count.get("balls"),
+        "strikes": count.get("strikes"),
+        "outs": count.get("outs"),
+        "pitch_type": pitch_type.get("code"),
+        "pitch_name": pitch_type.get("description"),
+        "call_code": code,
+        "call_description": details.get("description"),
+        "event_type": play.get("result", {}).get("eventType"),
+        "result_event": play.get("result", {}).get("event"),
+        "result_description": play.get("result", {}).get("description"),
+        "is_in_play": details.get("isInPlay"),
+        "is_strike": details.get("isStrike"),
+        "is_ball": details.get("isBall"),
+        "is_out": details.get("isOut"),
+        "is_whiff": code in whiff_codes,
+        "start_speed": maybe_float(pitch_data.get("startSpeed")),
+        "end_speed": maybe_float(pitch_data.get("endSpeed")),
+        "zone": pitch_data.get("zone"),
+        "plate_x": maybe_float(coordinates.get("pX")),
+        "plate_z": maybe_float(coordinates.get("pZ")),
+        "extension": maybe_float(pitch_data.get("extension")),
+        "spin_rate": maybe_float(breaks.get("spinRate")),
+        "spin_direction": maybe_float(breaks.get("spinDirection")),
+        "break_horizontal": maybe_float(breaks.get("breakHorizontal")),
+        "break_vertical_induced": maybe_float(breaks.get("breakVerticalInduced")),
+        "launch_speed": maybe_float(hit_data.get("launchSpeed")),
+        "launch_angle": maybe_float(hit_data.get("launchAngle")),
+        "total_distance": maybe_float(hit_data.get("totalDistance")),
+        "trajectory": hit_data.get("trajectory"),
+        "hardness": hit_data.get("hardness"),
+        "hit_location": hit_data.get("location"),
+        "coord_x": maybe_float(hit_data.get("coordinates", {}).get("coordX")),
+        "coord_y": maybe_float(hit_data.get("coordinates", {}).get("coordY")),
+    }
+
+
+def extract_event_rows(
     game: dict[str, Any], live_data: dict[str, Any], sport_id: int, whiff_codes: set[str]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    team_contexts = team_contexts_by_side(game, sport_id)
+    pitch_rows: list[dict[str, Any]] = []
+    batted_ball_rows: list[dict[str, Any]] = []
+
+    plays = live_data.get("liveData", {}).get("plays", {}).get("allPlays", [])
+    for play in plays:
+        for event in play.get("playEvents", []):
+            if not event.get("isPitch"):
+                continue
+
+            row = event_context(game, play, event, sport_id, whiff_codes, team_contexts)
+            if row is None:
+                continue
+
+            pitch_rows.append({column: row.get(column) for column in PITCH_EVENT_COLUMNS})
+
+            if row.get("launch_speed") is not None or row.get("launch_angle") is not None:
+                batted_ball_row = {column: row.get(column) for column in BATTED_BALL_COLUMNS}
+                launch_speed = row.get("launch_speed")
+                batted_ball_row["is_hard_hit"] = launch_speed is not None and launch_speed >= 95
+                batted_ball_rows.append(batted_ball_row)
+
+    return pitch_rows, batted_ball_rows
+
+
+def extract_game_logs(
+    game: dict[str, Any], live_data: dict[str, Any], sport_id: int, whiff_codes: set[str]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     game_pk = int(game["gamePk"])
     game_date = game_date_from(game)
     boxscore = live_data.get("liveData", {}).get("boxscore", {})
     teams = boxscore.get("teams", {})
     batter_metrics, pitcher_metrics = collect_event_metrics(live_data, whiff_codes)
+    pitch_event_rows, batted_ball_rows = extract_event_rows(game, live_data, sport_id, whiff_codes)
 
     batter_rows: list[dict[str, Any]] = []
     pitcher_rows: list[dict[str, Any]] = []
@@ -248,19 +380,27 @@ def extract_game_logs(
                 }
                 pitcher_rows.append(row)
 
-    return batter_rows, pitcher_rows
+    return batter_rows, pitcher_rows, pitch_event_rows, batted_ball_rows
 
 
 def frames_from_rows(
-    batter_rows: list[dict[str, Any]], pitcher_rows: list[dict[str, Any]]
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    batter_rows: list[dict[str, Any]],
+    pitcher_rows: list[dict[str, Any]],
+    pitch_event_rows: list[dict[str, Any]] | None = None,
+    batted_ball_rows: list[dict[str, Any]] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     batters = pd.DataFrame(batter_rows, columns=BATTER_COLUMNS)
     pitchers = pd.DataFrame(pitcher_rows, columns=PITCHER_COLUMNS)
+    pitch_events = pd.DataFrame(pitch_event_rows or [], columns=PITCH_EVENT_COLUMNS)
+    batted_balls = pd.DataFrame(batted_ball_rows or [], columns=BATTED_BALL_COLUMNS)
 
-    for df in (batters, pitchers):
+    for df in (batters, pitchers, pitch_events, batted_balls):
         if not df.empty:
             df["game_date"] = pd.to_datetime(df["game_date"]).dt.date
-            df.sort_values(["game_date", "level", "team_name", "player_name"], inplace=True)
+            event_sort = ["game_date", "game_pk", "at_bat_index", "event_index"]
+            log_sort = ["game_date", "level", "team_name", "player_name"]
+            sort_columns = event_sort if "at_bat_index" in df else log_sort
+            df.sort_values(sort_columns, inplace=True)
             df.reset_index(drop=True, inplace=True)
 
-    return batters, pitchers
+    return batters, pitchers, pitch_events, batted_balls

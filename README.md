@@ -33,6 +33,8 @@ Outputs:
 ```text
 data/parquet/batter_game_logs/game_date=YYYY-MM-DD/batter_game_logs.parquet
 data/parquet/pitcher_game_logs/game_date=YYYY-MM-DD/pitcher_game_logs.parquet
+data/parquet/pitch_events/game_date=YYYY-MM-DD/pitch_events.parquet
+data/parquet/batted_ball_events/game_date=YYYY-MM-DD/batted_ball_events.parquet
 ```
 
 ## Load MotherDuck
@@ -57,6 +59,44 @@ python -m milb_warehouse.cli --start-date 2026-03-27 --end-date 2026-04-30 --mot
 
 The loader deletes and reloads the requested date, which makes daily runs
 idempotent. Date ranges run serially and reuse one MotherDuck connection.
+
+MotherDuck tables:
+
+- `batter_game_logs`
+- `pitcher_game_logs`
+- `pitch_events`
+- `batted_ball_events`
+
+Use the event-level tables for Statcast-style aggregates so you do not average
+game-level averages. For example:
+
+```sql
+SELECT
+    batter_id,
+    batter_name,
+    COUNT(*) AS bbe,
+    AVG(launch_speed) AS avg_ev,
+    MAX(launch_speed) AS max_ev,
+    AVG(launch_angle) AS avg_la
+FROM batted_ball_events
+GROUP BY batter_id, batter_name;
+```
+
+```sql
+SELECT
+    pitcher_id,
+    pitcher_name,
+    pitch_type,
+    COUNT(*) AS pitches,
+    AVG(start_speed) AS avg_velocity,
+    AVG(spin_rate) AS avg_spin_rate,
+    SUM(CASE WHEN is_whiff THEN 1 ELSE 0 END)::DOUBLE / COUNT(*) AS whiff_pct
+FROM pitch_events
+GROUP BY pitcher_id, pitcher_name, pitch_type;
+```
+
+Convenience views `batter_statcast_summary` and
+`pitcher_pitch_type_summary` are also created from the event-level tables.
 
 ## Daily GitHub Actions Load
 
