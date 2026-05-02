@@ -19,9 +19,9 @@ on:
 
 jobs:
   backfill:
-    name: Backfill MiLB monthly chunks
+    name: Backfill MiLB date range
     runs-on: ubuntu-latest
-    timeout-minutes: 720
+    timeout-minutes: 360
 
     env:
       motherduck_token: ${{ secrets.MOTHERDUCK_TOKEN }}
@@ -29,8 +29,6 @@ jobs:
       INPUT_START_DATE: ${{ github.event.inputs.start_date }}
       INPUT_END_DATE: ${{ github.event.inputs.end_date }}
       INPUT_MOTHERDUCK_DB: ${{ github.event.inputs.motherduck_db || '' }}
-      BACKFILL_DELAY: "0.3"
-      BACKFILL_RETRIES: "5"
 
     steps:
       - name: Check out repository
@@ -59,58 +57,12 @@ jobs:
           echo "motherduck_db=$motherduck_db" >> "$GITHUB_OUTPUT"
           echo "Backfilling $INPUT_START_DATE through $INPUT_END_DATE into $motherduck_db"
 
-      - name: Build monthly chunks
-        id: chunks
-        shell: python
-        run: |
-          from datetime import date, timedelta
-          import os
-
-          start_date = date.fromisoformat(os.environ["INPUT_START_DATE"])
-          end_date = date.fromisoformat(os.environ["INPUT_END_DATE"])
-          if start_date > end_date:
-              raise SystemExit("start_date must be on or before end_date")
-
-          chunk_path = os.environ["GITHUB_WORKSPACE"] + "/backfill_chunks.txt"
-          chunk_count = 0
-          current = start_date
-
-          with open(chunk_path, "w", encoding="utf-8") as chunks:
-              while current <= end_date:
-                  if current.month == 12:
-                      next_month = date(current.year + 1, 1, 1)
-                  else:
-                      next_month = date(current.year, current.month + 1, 1)
-
-                  chunk_end = min(end_date, next_month - timedelta(days=1))
-                  chunks.write(f"{current.isoformat()} {chunk_end.isoformat()}\n")
-                  chunk_count += 1
-                  current = chunk_end + timedelta(days=1)
-
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"chunk_count={chunk_count}\n")
-
-          print(f"Wrote {chunk_count} monthly chunk(s) to {chunk_path}")
-
-      - name: Backfill MotherDuck in monthly chunks
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          chunk_number=0
-          while read -r chunk_start chunk_end; do
-            chunk_number=$((chunk_number + 1))
-            echo "::group::Chunk ${chunk_number}/${{ steps.chunks.outputs.chunk_count }}: ${chunk_start} to ${chunk_end}"
-
-            python -m milb_warehouse.cli \
-              --start-date "$chunk_start" \
-              --end-date "$chunk_end" \
-              --motherduck-db "${{ steps.settings.outputs.motherduck_db }}" \
-              --delay "$BACKFILL_DELAY" \
-              --retries "$BACKFILL_RETRIES"
-
-            echo "::endgroup::"
-          done < backfill_chunks.txt
+      - name: Backfill MotherDuck
+        run: >
+          python -m milb_warehouse.cli
+          --start-date "${{ github.event.inputs.start_date }}"
+          --end-date "${{ github.event.inputs.end_date }}"
+          --motherduck-db "${{ steps.settings.outputs.motherduck_db }}"
 
       - name: Upload generated artifacts
         if: always()
