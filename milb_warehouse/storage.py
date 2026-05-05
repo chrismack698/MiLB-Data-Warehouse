@@ -6,7 +6,13 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from .constants import BATTED_BALL_COLUMNS, BATTER_COLUMNS, PITCHER_COLUMNS, PITCH_EVENT_COLUMNS
+from .constants import (
+    BATTED_BALL_COLUMNS,
+    BATTER_COLUMNS,
+    PITCHER_COLUMNS,
+    PITCH_EVENT_COLUMNS,
+    PLAYER_COLUMNS,
+)
 
 if TYPE_CHECKING:
     import duckdb
@@ -35,6 +41,30 @@ def connect_motherduck(database: str) -> duckdb.DuckDBPyConnection:
 
 
 def create_tables(con: "duckdb.DuckDBPyConnection") -> None:
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS players (
+            player_id INTEGER,
+            player_name VARCHAR,
+            birth_date DATE,
+            birth_city VARCHAR,
+            birth_state_province VARCHAR,
+            birth_country VARCHAR,
+            height VARCHAR,
+            weight INTEGER,
+            active BOOLEAN,
+            primary_position_code VARCHAR,
+            primary_position_name VARCHAR,
+            primary_position_type VARCHAR,
+            primary_position_abbreviation VARCHAR,
+            bats VARCHAR,
+            throws VARCHAR,
+            draft_year INTEGER,
+            mlb_debut_date DATE,
+            name_slug VARCHAR
+        )
+        """
+    )
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS batter_game_logs (
@@ -223,6 +253,17 @@ def create_tables(con: "duckdb.DuckDBPyConnection") -> None:
 
 
 def migrate_tables(con: "duckdb.DuckDBPyConnection") -> None:
+    for column in PLAYER_COLUMNS:
+        if column in {"player_id", "weight", "draft_year"}:
+            column_type = "INTEGER"
+        elif column in {"birth_date", "mlb_debut_date"}:
+            column_type = "DATE"
+        elif column == "active":
+            column_type = "BOOLEAN"
+        else:
+            column_type = "VARCHAR"
+        con.execute(f"ALTER TABLE players ADD COLUMN IF NOT EXISTS {column} {column_type}")
+
     for table_name, id_column in TABLE_ID_COLUMNS.items():
         con.execute(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {id_column} BIGINT")
         con.execute(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS season INTEGER")
@@ -257,11 +298,24 @@ def migrate_tables(con: "duckdb.DuckDBPyConnection") -> None:
 
 
 def create_views(con: "duckdb.DuckDBPyConnection") -> None:
+    batter_log_columns = ",\n            ".join(f"b.{column}" for column in BATTER_COLUMNS)
+    pitcher_log_columns = ",\n            ".join(f"pgl.{column}" for column in PITCHER_COLUMNS)
+
     con.execute(
-        """
+        f"""
         CREATE OR REPLACE VIEW batter_game_logs_enriched AS
         SELECT
-            *,
+            {batter_log_columns},
+            DATE_DIFF('year', p.birth_date, b.game_date)
+                - CASE
+                    WHEN MONTH(b.game_date) < MONTH(p.birth_date)
+                      OR (
+                        MONTH(b.game_date) = MONTH(p.birth_date)
+                        AND DAY(b.game_date) < DAY(p.birth_date)
+                      )
+                    THEN 1
+                    ELSE 0
+                  END AS player_age,
             h::DOUBLE / NULLIF(ab, 0) AS avg,
             bb::DOUBLE / NULLIF(pa, 0) AS bb_pct,
             so::DOUBLE / NULLIF(pa, 0) AS k_pct,
@@ -277,14 +331,26 @@ def create_views(con: "duckdb.DuckDBPyConnection") -> None:
                 - h::DOUBLE / NULLIF(ab, 0)
             ) AS iso,
             (h - hr)::DOUBLE / NULLIF(ab - so - hr + sf, 0) AS babip
-        FROM batter_game_logs
+        FROM batter_game_logs AS b
+        LEFT JOIN players AS p
+            ON b.player_id = p.player_id
         """
     )
     con.execute(
-        """
+        f"""
         CREATE OR REPLACE VIEW pitcher_game_logs_enriched AS
         SELECT
-            *,
+            {pitcher_log_columns},
+            DATE_DIFF('year', p.birth_date, pgl.game_date)
+                - CASE
+                    WHEN MONTH(pgl.game_date) < MONTH(p.birth_date)
+                      OR (
+                        MONTH(pgl.game_date) = MONTH(p.birth_date)
+                        AND DAY(pgl.game_date) < DAY(p.birth_date)
+                      )
+                    THEN 1
+                    ELSE 0
+                  END AS player_age,
             ip_outs::DOUBLE / 3.0 AS ip,
             so * 9.0 / NULLIF(ip_outs / 3.0, 0) AS k_per_9,
             bb * 9.0 / NULLIF(ip_outs / 3.0, 0) AS bb_per_9,
@@ -297,7 +363,9 @@ def create_views(con: "duckdb.DuckDBPyConnection") -> None:
             (bb + h)::DOUBLE / NULLIF(ip_outs / 3.0, 0) AS whip,
             h::DOUBLE / NULLIF(tbf - bb - hbp - so - hr, 0) AS babip,
             whiffs::DOUBLE / NULLIF(pitches, 0) AS whiff_pct
-        FROM pitcher_game_logs
+        FROM pitcher_game_logs AS pgl
+        LEFT JOIN players AS p
+            ON pgl.player_id = p.player_id
         """
     )
     con.execute(
@@ -305,8 +373,20 @@ def create_views(con: "duckdb.DuckDBPyConnection") -> None:
         CREATE OR REPLACE VIEW batter_statcast_summary AS
         SELECT
             season,
-            batter_id AS player_id,
-            batter_name AS player_name,
+            bbe.batter_id AS player_id,
+            bbe.batter_name AS player_name,
+            MAX(
+                DATE_DIFF('year', p.birth_date, bbe.game_date)
+                - CASE
+                    WHEN MONTH(bbe.game_date) < MONTH(p.birth_date)
+                      OR (
+                        MONTH(bbe.game_date) = MONTH(p.birth_date)
+                        AND DAY(bbe.game_date) < DAY(p.birth_date)
+                      )
+                    THEN 1
+                    ELSE 0
+                  END
+            ) AS player_age,
             level,
             COUNT(*) AS bbe,
             AVG(launch_speed) AS avg_ev,
@@ -315,8 +395,10 @@ def create_views(con: "duckdb.DuckDBPyConnection") -> None:
             SUM(CASE WHEN is_hard_hit THEN 1 ELSE 0 END) AS hard_hit,
             SUM(CASE WHEN is_hard_hit THEN 1 ELSE 0 END)::DOUBLE
                 / NULLIF(COUNT(launch_speed), 0) AS hard_hit_pct
-        FROM batted_ball_events
-        GROUP BY season, batter_id, batter_name, level
+        FROM batted_ball_events AS bbe
+        LEFT JOIN players AS p
+            ON bbe.batter_id = p.player_id
+        GROUP BY season, bbe.batter_id, bbe.batter_name, level
         """
     )
     con.execute(
@@ -324,8 +406,20 @@ def create_views(con: "duckdb.DuckDBPyConnection") -> None:
         CREATE OR REPLACE VIEW pitcher_pitch_type_summary AS
         SELECT
             season,
-            pitcher_id AS player_id,
-            pitcher_name AS player_name,
+            pe.pitcher_id AS player_id,
+            pe.pitcher_name AS player_name,
+            MAX(
+                DATE_DIFF('year', p.birth_date, pe.game_date)
+                - CASE
+                    WHEN MONTH(pe.game_date) < MONTH(p.birth_date)
+                      OR (
+                        MONTH(pe.game_date) = MONTH(p.birth_date)
+                        AND DAY(pe.game_date) < DAY(p.birth_date)
+                      )
+                    THEN 1
+                    ELSE 0
+                  END
+            ) AS player_age,
             level,
             pitch_type,
             pitch_name,
@@ -335,8 +429,10 @@ def create_views(con: "duckdb.DuckDBPyConnection") -> None:
             AVG(spin_rate) AS avg_spin_rate,
             SUM(CASE WHEN is_whiff THEN 1 ELSE 0 END) AS whiffs,
             SUM(CASE WHEN is_whiff THEN 1 ELSE 0 END)::DOUBLE / NULLIF(COUNT(*), 0) AS whiff_pct
-        FROM pitch_events
-        GROUP BY season, pitcher_id, pitcher_name, level, pitch_type, pitch_name
+        FROM pitch_events AS pe
+        LEFT JOIN players AS p
+            ON pe.pitcher_id = p.player_id
+        GROUP BY season, pe.pitcher_id, pe.pitcher_name, level, pitch_type, pitch_name
         """
     )
 
@@ -384,12 +480,64 @@ def reload_date(
     con.unregister("_reload_df")
 
 
+def upsert_players(con: "duckdb.DuckDBPyConnection", players: pd.DataFrame) -> None:
+    create_tables(con)
+    ordered = players.reindex(columns=PLAYER_COLUMNS)
+    if ordered.empty:
+        return
+
+    ordered = ordered.drop_duplicates(subset=["player_id"], keep="last")
+    con.register("_players_df", ordered)
+    columns = ", ".join(PLAYER_COLUMNS)
+    con.execute(
+        """
+        DELETE FROM players
+        WHERE player_id IN (SELECT player_id FROM _players_df)
+        """
+    )
+    con.execute(
+        f"""
+        INSERT INTO players ({columns})
+        SELECT {columns}
+        FROM _players_df
+        """
+    )
+    con.unregister("_players_df")
+
+
+def existing_fact_player_ids(con: "duckdb.DuckDBPyConnection") -> list[int]:
+    create_tables(con)
+    rows = con.execute(
+        """
+        SELECT DISTINCT player_id
+        FROM (
+            SELECT player_id FROM batter_game_logs
+            UNION ALL
+            SELECT player_id FROM pitcher_game_logs
+            UNION ALL
+            SELECT batter_id AS player_id FROM pitch_events
+            UNION ALL
+            SELECT pitcher_id AS player_id FROM pitch_events
+            UNION ALL
+            SELECT batter_id AS player_id FROM batted_ball_events
+            UNION ALL
+            SELECT pitcher_id AS player_id FROM batted_ball_events
+        )
+        WHERE player_id IS NOT NULL
+        ORDER BY player_id
+        """
+    ).fetchall()
+    return [int(row[0]) for row in rows]
+
+
 def reload_game_log_date(
     con: "duckdb.DuckDBPyConnection",
+    players: pd.DataFrame,
     batters: pd.DataFrame,
     pitchers: pd.DataFrame,
     game_date: date,
 ) -> None:
+    upsert_players(con, players)
     reload_date(con, "batter_game_logs", batters, game_date, BATTER_COLUMNS)
     reload_date(con, "pitcher_game_logs", pitchers, game_date, PITCHER_COLUMNS)
     create_views(con)
@@ -397,12 +545,14 @@ def reload_game_log_date(
 
 def reload_warehouse_date(
     con: "duckdb.DuckDBPyConnection",
+    players: pd.DataFrame,
     batters: pd.DataFrame,
     pitchers: pd.DataFrame,
     pitch_events: pd.DataFrame,
     batted_balls: pd.DataFrame,
     game_date: date,
 ) -> None:
+    upsert_players(con, players)
     reload_date(con, "batter_game_logs", batters, game_date, BATTER_COLUMNS)
     reload_date(con, "pitcher_game_logs", pitchers, game_date, PITCHER_COLUMNS)
     reload_date(con, "pitch_events", pitch_events, game_date, PITCH_EVENT_COLUMNS)

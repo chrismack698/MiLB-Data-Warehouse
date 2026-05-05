@@ -35,6 +35,7 @@ data/parquet/batter_game_logs/game_date=YYYY-MM-DD/batter_game_logs.parquet
 data/parquet/pitcher_game_logs/game_date=YYYY-MM-DD/pitcher_game_logs.parquet
 data/parquet/pitch_events/game_date=YYYY-MM-DD/pitch_events.parquet
 data/parquet/batted_ball_events/game_date=YYYY-MM-DD/batted_ball_events.parquet
+data/parquet/players/game_date=YYYY-MM-DD/players.parquet
 ```
 
 ## Load MotherDuck
@@ -57,25 +58,40 @@ For a season backfill, run:
 python -m milb_warehouse.cli --start-date 2026-03-27 --end-date 2026-04-30 --motherduck-db milb_stats
 ```
 
+To populate or refresh player metadata from rows already loaded in MotherDuck,
+without reloading historical games:
+
+```powershell
+python -m milb_warehouse.cli --refresh-players-only --motherduck-db milb_stats
+```
+
 The loader deletes and reloads the requested date, which makes daily runs
 idempotent. Date ranges run serially and reuse one MotherDuck connection.
 
 MotherDuck tables:
 
+- `players`
 - `batter_game_logs`
 - `pitcher_game_logs`
 - `pitch_events`
 - `batted_ball_events`
 
-Each MotherDuck table has a database-generated surrogate key:
+Each fact table has a database-generated surrogate key:
 
 - `batter_game_logs.batter_game_log_id`
 - `pitcher_game_logs.pitcher_game_log_id`
 - `pitch_events.pitch_event_id`
 - `batted_ball_events.batted_ball_event_id`
 
-Each table also has a `season` column so historical backfills can coexist with
-future seasons.
+Each fact table also has a `season` column so historical backfills can coexist
+with future seasons.
+
+The `players` table stores player metadata from MLB Stats API game feeds,
+including `birth_date`, handedness, position, draft year, and MLB debut date.
+It is not limited to MiLB players; it can store any player returned by loaded
+game feeds, including MLB players if MLB games are loaded with `--sport-ids 1`.
+Enriched game-log views calculate `player_age` from `players.birth_date` as of
+each `game_date`.
 
 Use the event-level tables for Statcast-style aggregates so you do not average
 game-level averages. For example:

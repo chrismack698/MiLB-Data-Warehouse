@@ -15,6 +15,11 @@ on:
         description: "MotherDuck database name. Defaults to repository variable MOTHERDUCK_DB or milb_stats."
         required: false
         type: string
+      refresh_players_only:
+        description: "Populate players from existing MotherDuck fact rows without reloading games."
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   load:
@@ -27,6 +32,7 @@ jobs:
       DEFAULT_MOTHERDUCK_DB: ${{ vars.MOTHERDUCK_DB || 'milb_stats' }}
       INPUT_GAME_DATE: ${{ github.event.inputs.game_date || '' }}
       INPUT_MOTHERDUCK_DB: ${{ github.event.inputs.motherduck_db || '' }}
+      INPUT_REFRESH_PLAYERS_ONLY: ${{ github.event.inputs.refresh_players_only || 'false' }}
 
     steps:
       - name: Check out repository
@@ -52,15 +58,30 @@ jobs:
 
           game_date="${INPUT_GAME_DATE:-$(TZ=America/Chicago date -d 'yesterday' +%F)}"
           motherduck_db="${INPUT_MOTHERDUCK_DB:-$DEFAULT_MOTHERDUCK_DB}"
+          refresh_players_only="${INPUT_REFRESH_PLAYERS_ONLY:-false}"
 
           echo "game_date=$game_date" >> "$GITHUB_OUTPUT"
           echo "motherduck_db=$motherduck_db" >> "$GITHUB_OUTPUT"
-          echo "Loading game_date=$game_date into MotherDuck database $motherduck_db"
+          echo "refresh_players_only=$refresh_players_only" >> "$GITHUB_OUTPUT"
+
+          if [ "$refresh_players_only" = "true" ]; then
+            echo "Refreshing players into MotherDuck database $motherduck_db"
+          else
+            echo "Loading game_date=$game_date into MotherDuck database $motherduck_db"
+          fi
 
       - name: Extract and load MotherDuck
+        if: steps.settings.outputs.refresh_players_only != 'true'
         run: >
           python -m milb_warehouse.cli
           --date "${{ steps.settings.outputs.game_date }}"
+          --motherduck-db "${{ steps.settings.outputs.motherduck_db }}"
+
+      - name: Refresh players only
+        if: steps.settings.outputs.refresh_players_only == 'true'
+        run: >
+          python -m milb_warehouse.cli
+          --refresh-players-only
           --motherduck-db "${{ steps.settings.outputs.motherduck_db }}"
 
       - name: Upload generated artifacts

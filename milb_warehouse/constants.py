@@ -5,6 +5,7 @@ BASE_URL = "https://statsapi.mlb.com/api/v1"
 LIVE_URL = "https://statsapi.mlb.com/api/v1.1"
 
 SPORT_LEVELS = {
+    1: "MLB",
     11: "AAA",
     12: "AA",
     13: "A+",
@@ -12,9 +13,31 @@ SPORT_LEVELS = {
     16: "R",
 }
 
-DEFAULT_SPORT_IDS = tuple(SPORT_LEVELS)
+DEFAULT_SPORT_IDS = (11, 12, 13, 14, 16)
 
 STATIC_WHIFF_CODES = {"S", "W", "Q", "T", "M", "O"}
+
+
+PLAYER_COLUMNS = [
+    "player_id",
+    "player_name",
+    "birth_date",
+    "birth_city",
+    "birth_state_province",
+    "birth_country",
+    "height",
+    "weight",
+    "active",
+    "primary_position_code",
+    "primary_position_name",
+    "primary_position_type",
+    "primary_position_abbreviation",
+    "bats",
+    "throws",
+    "draft_year",
+    "mlb_debut_date",
+    "name_slug",
+]
 
 
 BATTER_COLUMNS = [

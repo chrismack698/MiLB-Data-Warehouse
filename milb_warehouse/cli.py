@@ -9,8 +9,15 @@ import pandas as pd
 
 from .api import StatsApiClient
 from .constants import DEFAULT_SPORT_IDS
-from .extract import extract_game_logs, frames_from_rows, is_final_game
-from .storage import connect_motherduck, reload_warehouse_date, write_parquet_snapshot
+from .extract import extract_game_logs, frames_from_rows, is_final_game, player_row
+from .storage import (
+    connect_motherduck,
+    create_views,
+    existing_fact_player_ids,
+    reload_warehouse_date,
+    upsert_players,
+    write_parquet_snapshot,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +50,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--force-refresh", action="store_true")
     parser.add_argument("--limit-games", type=int, default=0)
+    parser.add_argument(
+        "--refresh-players-only",
+        action="store_true",
+        help="Populate players from existing MotherDuck fact-table player IDs without reloading games.",
+    )
+    parser.add_argument(
+        "--people-batch-size",
+        type=int,
+        default=100,
+        help="Number of player IDs per MLB Stats API people request. Default: 100.",
+    )
     return parser.parse_args()
 
 
@@ -74,8 +92,16 @@ def extract_for_date(
     sport_ids: tuple[int, ...],
     client: StatsApiClient,
     limit_games: int = 0,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+]:
     whiff_codes = client.whiff_codes()
+    player_rows: list[dict[str, Any]] = []
     batter_rows: list[dict[str, Any]] = []
     pitcher_rows: list[dict[str, Any]] = []
     pitch_event_rows: list[dict[str, Any]] = []
@@ -108,7 +134,7 @@ def extract_for_date(
 
             try:
                 live_data = client.live_game(game_pk)
-                batters, pitchers, pitch_events, batted_balls = extract_game_logs(
+                players, batters, pitchers, pitch_events, batted_balls = extract_game_logs(
                     game, live_data, sport_id, whiff_codes
                 )
             except Exception as exc:
@@ -118,6 +144,7 @@ def extract_for_date(
                 print(f"    skipped: {exc}", flush=True)
                 continue
 
+            player_rows.extend(players)
             batter_rows.extend(batters)
             pitcher_rows.extend(pitchers)
             pitch_event_rows.extend(pitch_events)
@@ -127,13 +154,17 @@ def extract_for_date(
                 print(f"Reached --limit-games {limit_games}", flush=True)
                 return (
                     *frames_from_rows(
-                        batter_rows, pitcher_rows, pitch_event_rows, batted_ball_rows
+                        player_rows,
+                        batter_rows,
+                        pitcher_rows,
+                        pitch_event_rows,
+                        batted_ball_rows,
                     ),
                     pd.DataFrame(error_rows),
                 )
 
     return (
-        *frames_from_rows(batter_rows, pitcher_rows, pitch_event_rows, batted_ball_rows),
+        *frames_from_rows(player_rows, batter_rows, pitcher_rows, pitch_event_rows, batted_ball_rows),
         pd.DataFrame(error_rows),
     )
 
@@ -148,16 +179,18 @@ def load_one_date(
     motherduck_con: Any | None = None,
 ) -> None:
     print(f"Extracting MiLB game logs for {game_date.isoformat()}", flush=True)
-    batters, pitchers, pitch_events, batted_balls, errors = extract_for_date(
+    players, batters, pitchers, pitch_events, batted_balls, errors = extract_for_date(
         game_date, sport_ids, client, limit_games
     )
 
+    player_path = write_parquet_snapshot(players, parquet_dir, "players", game_date)
     batter_path = write_parquet_snapshot(batters, parquet_dir, "batter_game_logs", game_date)
     pitcher_path = write_parquet_snapshot(pitchers, parquet_dir, "pitcher_game_logs", game_date)
     pitch_event_path = write_parquet_snapshot(pitch_events, parquet_dir, "pitch_events", game_date)
     batted_ball_path = write_parquet_snapshot(
         batted_balls, parquet_dir, "batted_ball_events", game_date
     )
+    print(f"Wrote {len(players):,} player rows to {player_path}", flush=True)
     print(f"Wrote {len(batters):,} batter rows to {batter_path}", flush=True)
     print(f"Wrote {len(pitchers):,} pitcher rows to {pitcher_path}", flush=True)
     print(f"Wrote {len(pitch_events):,} pitch rows to {pitch_event_path}", flush=True)
@@ -172,9 +205,40 @@ def load_one_date(
 
     if motherduck_con is not None:
         reload_warehouse_date(
-            motherduck_con, batters, pitchers, pitch_events, batted_balls, game_date
+            motherduck_con, players, batters, pitchers, pitch_events, batted_balls, game_date
         )
         print(f"Reloaded {game_date.isoformat()} into MotherDuck database {motherduck_db}", flush=True)
+
+
+def refresh_players_only(
+    con: Any,
+    client: StatsApiClient,
+    batch_size: int,
+    motherduck_db: str,
+) -> None:
+    if batch_size < 1:
+        raise ValueError("--people-batch-size must be at least 1.")
+
+    player_ids = existing_fact_player_ids(con)
+    print(f"Found {len(player_ids):,} distinct player IDs in existing fact tables", flush=True)
+
+    rows: list[dict[str, Any]] = []
+    for offset in range(0, len(player_ids), batch_size):
+        batch = player_ids[offset : offset + batch_size]
+        people = client.people(batch)
+        for person in people:
+            row = player_row(person)
+            if row is not None:
+                rows.append(row)
+        print(
+            f"  fetched {min(offset + batch_size, len(player_ids)):,}/{len(player_ids):,}",
+            flush=True,
+        )
+
+    players = pd.DataFrame(rows)
+    upsert_players(con, players)
+    create_views(con)
+    print(f"Upserted {len(players):,} player rows into MotherDuck database {motherduck_db}", flush=True)
 
 
 def main() -> None:
@@ -191,6 +255,17 @@ def main() -> None:
         request_timeout=args.request_timeout,
         retries=args.retries,
     )
+
+    if args.refresh_players_only:
+        if not args.motherduck_db:
+            raise ValueError("--refresh-players-only requires --motherduck-db.")
+
+        con = connect_motherduck(args.motherduck_db)
+        try:
+            refresh_players_only(con, client, args.people_batch_size, args.motherduck_db)
+        finally:
+            con.close()
+        return
 
     print(f"Loading {len(load_dates)} date(s): {load_dates[0]} through {load_dates[-1]}", flush=True)
     if args.motherduck_db:

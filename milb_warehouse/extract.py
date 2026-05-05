@@ -12,6 +12,7 @@ from .constants import (
     BATTER_COLUMNS,
     PITCHER_COLUMNS,
     PITCH_EVENT_COLUMNS,
+    PLAYER_COLUMNS,
     SPORT_LEVELS,
 )
 
@@ -90,6 +91,53 @@ def season_from(game: dict[str, Any]) -> int:
     if game.get("season"):
         return int(game["season"])
     return int(game_date_from(game)[:4])
+
+
+def maybe_date(value: Any) -> str | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        return None
+
+
+def player_row(player: dict[str, Any]) -> dict[str, Any] | None:
+    player_id = player.get("id")
+    if not player_id:
+        return None
+
+    primary_position = player.get("primaryPosition", {})
+    return {
+        "player_id": int(player_id),
+        "player_name": player.get("fullName"),
+        "birth_date": maybe_date(player.get("birthDate")),
+        "birth_city": player.get("birthCity"),
+        "birth_state_province": player.get("birthStateProvince"),
+        "birth_country": player.get("birthCountry"),
+        "height": player.get("height"),
+        "weight": player.get("weight"),
+        "active": player.get("active"),
+        "primary_position_code": primary_position.get("code"),
+        "primary_position_name": primary_position.get("name"),
+        "primary_position_type": primary_position.get("type"),
+        "primary_position_abbreviation": primary_position.get("abbreviation"),
+        "bats": player.get("batSide", {}).get("code"),
+        "throws": player.get("pitchHand", {}).get("code"),
+        "draft_year": player.get("draftYear"),
+        "mlb_debut_date": maybe_date(player.get("mlbDebutDate")),
+        "name_slug": player.get("nameSlug"),
+    }
+
+
+def extract_player_rows(live_data: dict[str, Any]) -> list[dict[str, Any]]:
+    players = live_data.get("gameData", {}).get("players", {})
+    rows: list[dict[str, Any]] = []
+    for player in players.values():
+        row = player_row(player)
+        if row is not None:
+            rows.append(row)
+    return rows
 
 
 def collect_event_metrics(
@@ -281,10 +329,17 @@ def extract_event_rows(
 
 def extract_game_logs(
     game: dict[str, Any], live_data: dict[str, Any], sport_id: int, whiff_codes: set[str]
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
     game_pk = int(game["gamePk"])
     game_date = game_date_from(game)
     season = season_from(game)
+    player_rows = extract_player_rows(live_data)
     boxscore = live_data.get("liveData", {}).get("boxscore", {})
     teams = boxscore.get("teams", {})
     batter_metrics, pitcher_metrics = collect_event_metrics(live_data, whiff_codes)
@@ -391,19 +446,26 @@ def extract_game_logs(
                 }
                 pitcher_rows.append(row)
 
-    return batter_rows, pitcher_rows, pitch_event_rows, batted_ball_rows
+    return player_rows, batter_rows, pitcher_rows, pitch_event_rows, batted_ball_rows
 
 
 def frames_from_rows(
+    player_rows: list[dict[str, Any]],
     batter_rows: list[dict[str, Any]],
     pitcher_rows: list[dict[str, Any]],
     pitch_event_rows: list[dict[str, Any]] | None = None,
     batted_ball_rows: list[dict[str, Any]] | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    players = pd.DataFrame(player_rows, columns=PLAYER_COLUMNS)
     batters = pd.DataFrame(batter_rows, columns=BATTER_COLUMNS)
     pitchers = pd.DataFrame(pitcher_rows, columns=PITCHER_COLUMNS)
     pitch_events = pd.DataFrame(pitch_event_rows or [], columns=PITCH_EVENT_COLUMNS)
     batted_balls = pd.DataFrame(batted_ball_rows or [], columns=BATTED_BALL_COLUMNS)
+
+    if not players.empty:
+        players.drop_duplicates(subset=["player_id"], keep="last", inplace=True)
+        players.sort_values(["player_name", "player_id"], inplace=True)
+        players.reset_index(drop=True, inplace=True)
 
     for df in (batters, pitchers, pitch_events, batted_balls):
         if not df.empty:
@@ -414,4 +476,4 @@ def frames_from_rows(
             df.sort_values(sort_columns, inplace=True)
             df.reset_index(drop=True, inplace=True)
 
-    return batters, pitchers, pitch_events, batted_balls
+    return players, batters, pitchers, pitch_events, batted_balls

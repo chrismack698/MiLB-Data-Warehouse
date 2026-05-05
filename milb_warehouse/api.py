@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha1
 import time
 from datetime import date
 from pathlib import Path
@@ -69,6 +70,18 @@ class StatsApiClient:
         url = f"{LIVE_URL}/game/{game_pk}/feed/live"
         cache_path = self.cache_dir / "games" / f"{game_pk}.json"
         return self.request_json(url, cache_path)
+
+    def people(self, player_ids: list[int]) -> list[dict[str, Any]]:
+        if not player_ids:
+            return []
+
+        ids = sorted(set(player_ids))
+        id_string = ",".join(str(player_id) for player_id in ids)
+        cache_key = sha1(id_string.encode("utf-8")).hexdigest()
+        url = f"{BASE_URL}/people?personIds={id_string}"
+        cache_path = self.cache_dir / "metadata" / "people" / f"{cache_key}.json"
+        data = self.request_json(url, cache_path)
+        return data.get("people", [])
 
     def whiff_codes(self) -> set[str]:
         url = f"{BASE_URL}/pitchCodes"
